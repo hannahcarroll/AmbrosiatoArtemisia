@@ -1,8 +1,8 @@
 packages <- c("grid", "Rcpp", "sp", "dtplyr", "ggmap", "rgdal", "rgeos", "maptools", 
-              "plyr", "dplyr", "tidyr", "cowplot", "MASS", "caret",
-       "RColorBrewer", "maps", "sqldf", "neotoma", "analogue", "data.table", "raster", 
-       "spatialEco", "pca3d", "rgl", "plotly", "tictoc", "mda", "viridis",
-       "htmlwidgets", "leaflet", "widgetframe", "MASS", "gstat", "mgcv")
+              "dplyr", "tidyr", "cowplot", "MASS", "caret",
+       "RColorBrewer", "maps", "sqldf", "neotoma", "data.table", "raster", 
+       "spatialEco", "pca3d", "rgl", "tictoc", "mda", "viridis",
+       "htmlwidgets", "MASS", "gstat", "mgcv")
 
 lapply(packages, require, character.only = TRUE)
 
@@ -384,33 +384,171 @@ count(surface.pollen.corrected %>%
 
 
 
+###################################### Fit models #############################################
+
+# Scenario: Both present
+
+# Get just annual precip and the Ambrosia to Artemisia ratio
+
+twocol <- surface.pollen.corrected[grepl("BothPresent", surface.pollen.corrected$category),] %>%
+  select("AnnP", "ambtoart")
+
+# Log ratio
+twocol$ambtoart <- log(twocol$ambtoart)
+
+# Fit the b spline with three knots
+both.gam <- gam(formula=log(ambtoart) ~ splines::bs(AnnP,3), method="ML",
+                data=surface.pollen.corrected[grepl("BothPresent", surface.pollen.corrected$category),])
+
+# Function to get the r2 on the bootstrapped model
+rsq <- function(formula, data, indices) {
+  d <- data[indices,] # allows boot to select sample 
+  fit <- lm(formula, data=d)
+  return(summary(fit)$r.square)
+}
+
+# Do 1000 replicates
+results <- boot(data=twocol, statistic=rsq, 
+   R=1000, formula=ambtoart ~ splines::bs(AnnP,3))
+
+# Bootstrapped fit
+results
+plot(results)
+
+# Confidence interval
+boot.ci(results, type="bca")
+
+# Create a reversed model to do the precipitation predictions
+
+reverse.both.gam <- gam(formula=AnnP ~ splines::bs(log(ambtoart),3), method="ML",
+                data=surface.pollen.corrected[grepl("BothPresent", surface.pollen.corrected$category),])
+
+summary(reverse.both.gam) # Make sure it worked
+
+# Split off the presettlement data
+pres.both <- pres.pollen.regions2[grepl("BothPresent", pres.pollen.regions2$category),]
+
+# Use the reversed model to 'predict' past precipitation
+pres.both$testpredict <- predict(reverse.both.gam, newdata = pres.both, interval = "confidence")
+
+# Repeat for the No Ambrosia scenario
+
+# Create the model
+noamb.gam <- gam(formula=log(ambtoart) ~ AnnP, method="ML",
+                data=surface.pollen.corrected[grepl("NoAmbrosia", surface.pollen.corrected$category),])
+summary(noamb.gam)
+
+# Reversed model for predictions
+reverse.noamb.gam <- gam(formula=AnnP ~ log(ambtoart), method="ML",
+                data=surface.pollen.corrected[grepl("NoAmbrosia", surface.pollen.corrected$category),])
+
+# Split out the presettlement data
+pres.noamb <- pres.pollen.regions2[grepl("NoAmbrosia", pres.pollen.regions2$category),]
+
+# Use the reversed model to 'predict' past precipitation
+pres.noamb$testpredict <- predict(reverse.noamb.gam, newdata = pres.noamb, interval = "confidence")
+
+# Repeat for No Artemisia scenario
+
+# Create the model
+
+noart.lm <- gam(formula=log(ambtoart) ~ AnnP, data=surface.pollen.corrected[grepl("NoArtemisia", surface.pollen.corrected$category),])
+summary(noart.lm)
+
+# Reversed model for predictions
+reverse.noart <- gam(formula=AnnP ~ log(ambtoart), data=surface.pollen.corrected[grepl("NoArtemisia", surface.pollen.corrected$category),])
+
+# Split out the No Art scenario
+pres.noart <- pres.pollen.regions2[grepl("NoArtemisia", pres.pollen.regions2$category),]
+
+# Use the reversed model to 'predict' past precipitation
+pres.noart$testpredict <- predict(reverse.noart, newdata = pres.noart, interval = "confidence")
+
+surf.noamb <- surface.pollen.corrected[grepl("NoAmbrosia", surface.pollen.corrected$category),]
 
 
+###################### Ecoregion analyses ##################################
 
+# Drop regions with <10 observations to prepare for ecoregion-based analyses
 
+s.pollen.regions2 <- surface.pollen.corrected[!grepl("TEXAS-LOUISIANA COASTAL PLAIN", surface.pollen.corrected$NA_L2NAME),]
 
-
-
-
-
-
-
-
-summary(lm(formula=log(ambtoart) ~ AnnP, data=surface.pollen.regions.df[grepl("NoAmbrosia", surface.pollen.regions.df$category),]))
-summary(lm(formula=log(ambtoart) ~ AnnP, data=s.pollen.nowc[grepl("NoAmbrosia", s.pollen.nowc$category),]))
-
-summary(lm(formula=log(ambtoart) ~ AnnP, data=surface.pollen.regions.df[grepl("NoArtemisia", surface.pollen.regions.df$category),]))
-summary(lm(formula=log(ambtoart) ~ AnnP, data=s.pollen.nowc [grepl("NoArtemisia", s.pollen.nowc $category),]))
-
+s.pollen.regions2 <- s.pollen.regions2[!grepl("SOFTWOOD SHIELD", s.pollen.regions2$NA_L2NAME),]
 
 # AOV followed by Tukey's HSD
 # Surface set
 
 aov.surf <- (aov(log(ambtoart) ~ NA_L2NAME, data=s.pollen.regions2))
+summary(aov.surf)
+
+# Tukey to correct for multiple comparisons
 tukey.surf <- TukeyHSD(aov.surf)
 t.surf <- as.data.frame(tukey.surf[["NA_L2NAME"]])
-summary(aov.surf)
-write.csv(t.surf, file="surfacetukey_nowc.csv")
+
+# write.csv(t.surf, file="surfacetukey_nowc.csv")
+
+############ Discriminant Function Analysis #################
+
+
+# Get only the columns we're worred about
+surface.set <- s.pollen.regions2 %>%
+  select("NA_L2NAME", "AnnP", "ambtoart")
+
+# Use log ratio
+surface.set$ambtoart <- log(surface.set$ambtoart)
+
+set.seed(123)
+
+# Split surface samples into training set and test set
+training.samples <- droplevels(surface.set$NA_L2NAME) %>%
+  createDataPartition(p = 0.8, list = FALSE)
+train.data <- surface.set[training.samples, ]
+test.data <- surface.set[-training.samples, ]
+
+# Estimate preprocessing parameters
+preproc.param <- train.data %>% 
+  preProcess(method = c("center", "scale"))
+# Transform the data using the estimated parameters
+train.transformed <- preproc.param %>% predict(train.data)
+test.transformed <- preproc.param %>% predict(test.data)
+
+# Fit the model
+model <- fda(droplevels(NA_L2NAME)~., data = train.transformed, method = mars)
+# Make predictions
+predicted.classes <- model %>% predict(test.transformed)
+# Model accuracy
+mean(predicted.classes == droplevels(test.transformed$NA_L2NAME))
+plot(model)
+
+# Run 1,000 times
+
+surf.means <- NULL
+
+surf.replicate <- function(df) {
+  training.samples <- droplevels(df$NA_L2NAME) %>%
+  createDataPartition(p = 0.8, list = FALSE)
+train.data <- surface.set[training.samples, ]
+test.data <- surface.set[-training.samples, ]
+
+# Estimate preprocessing parameters
+preproc.param <- train.data %>% 
+  preProcess(method = c("center", "scale"))
+# Transform the data using the estimated parameters
+train.transformed <- preproc.param %>% predict(train.data)
+test.transformed <- preproc.param %>% predict(test.data)
+
+# Fit the model
+model <- fda(droplevels(NA_L2NAME)~., data = train.transformed, method = mars)
+# Make predictions
+predicted.classes <- model %>% predict(test.transformed)
+# Model accuracy
+mean(predicted.classes == droplevels(test.transformed$NA_L2NAME))
+}
+surf.replicate(surface.set)
+tic()
+surf.means <- replicate(1000, surf.replicate(surface.set))
+summary(surf.means)
+toc()
 
 
 
